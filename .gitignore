@@ -1,5 +1,11 @@
 __pycache__/
 *.pyc
 venv/
-data/raw/*.csv
+data/raw/*.psv
+data/raw/physionet_training_setA/
+data/raw/physionet_training_setB/
+data/raw/*.txt
+reference_code/
 .ipynb_checkpoints/
+data/processed/*.csv
+data/processed/*.pkl

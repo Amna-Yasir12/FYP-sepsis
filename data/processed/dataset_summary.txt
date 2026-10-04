@@ -1,4 +1,0 @@
-Isolates: 1935
-Feature columns (gene presence/absence): 153
-Label distribution: resistant=429, susceptible=1506
-Graph: 22267 edges (cutoff=cutoff_210), avg degree=23.0

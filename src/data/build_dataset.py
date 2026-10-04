@@ -1,79 +1,63 @@
-from pathlib import Path
+import os
 import pandas as pd
+import numpy as np
 
-RAW = Path("data/raw")
-PROCESSED = Path("data/processed")
-PROCESSED.mkdir(parents=True, exist_ok=True)
+RAW_DIR_A = "data/raw/physionet_training_setA"
+RAW_DIR_B = "data/raw/physionet_training_setB"
+PROC_DIR = "data/processed"
+os.makedirs(PROC_DIR, exist_ok=True)
 
-def load_labels():
-    meta = pd.read_csv(RAW / "Metadata.csv")
-    meta = meta[["Isolate", "Year", "CIP"]].rename(columns={"Isolate": "isolate", "CIP": "label"})
-    before = len(meta)
-    meta = meta[meta["label"].isin(["S", "R"])].copy()
-    dropped = before - len(meta)
-    meta["label"] = (meta["label"] == "R").astype(int)
-    print(f"Loaded {len(meta)} isolates with a valid CIP label ({dropped} dropped for missing label).")
-    return meta
+SEED = 42
+np.random.seed(SEED)
 
-def load_gene_presence(filename, source_tag):
-    df = pd.read_csv(RAW / filename, sep="\t")
-    df = df[["Sample", "gene"]].dropna()
-    df["gene"] = source_tag + "__" + df["gene"].astype(str)
-    df["present"] = 1
-    wide = df.pivot_table(index="Sample", columns="gene", values="present", fill_value=0, aggfunc="max")
-    wide.index.name = "isolate"
-    return wide
+LABEL_COL = "SepsisLabel"
+TIME_COL = "ICULOS"
+ID_COL = "patient_id"
+CAT_FEATURES = ["Gender", "Unit1", "Unit2"]
 
-GRAPH_CUTOFF = "cutoff_210"
+# Columns dropped for excessive missingness, following the reference paper's approach
+HIGH_MISSING_COLS = [
+    "TroponinI", "EtCO2", "Bilirubin_direct", "Bilirubin_total", "Fibrinogen",
+    "Alkalinephos", "Calcium", "Phosphate", "SaO2", "PaCO2", "HCO3", "Magnesium", "Chloride",
+]
 
-def build_similarity_edges():
-    pop = pd.read_csv(RAW / "PopulationStructure.csv", index_col=0)
-    pop.index.name = "isolate"
-    clusters = pop[GRAPH_CUTOFF]
+WINDOW_LENGTH = 10      # hours per window, matches the paper
+LABEL_HORIZON = 6       # standard PhysioNet horizon (we deliberately use 6, not the paper's non-standard 12)
 
-    edges = []
-    for _, group in clusters.groupby(clusters):
-        members = group.index.tolist()
-        if len(members) < 2:
-            continue
-        for i in range(len(members)):
-            for j in range(i + 1, len(members)):
-                edges.append((members[i], members[j]))
-    return pd.DataFrame(edges, columns=["isolate_a", "isolate_b"])
+def load_patient_file(filepath, patient_id):
+    df = pd.read_csv(filepath, sep="|")
+    df = df.drop(columns=[c for c in HIGH_MISSING_COLS if c in df.columns])
+    df["ShockIndex"] = df["HR"] / (df["SBP"] + 1e-6)
+    df = df.ffill()
+    df[ID_COL] = patient_id
+    return df
+
+def load_all_patients(raw_dir, hospital_label):
+    all_dfs = []
+    files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".psv"))
+    for fname in files:
+        patient_id = fname.replace("p", "").replace(".psv", "")
+        filepath = os.path.join(raw_dir, fname)
+        df = load_patient_file(filepath, patient_id)
+        df["hospital"] = hospital_label
+        all_dfs.append(df)
+    return pd.concat(all_dfs, ignore_index=True)
 
 def main():
-    labels = load_labels()
+    print("Loading Set A...")
+    df_a = load_all_patients(RAW_DIR_A, "A")
+    print(f"Set A: {len(df_a)} rows, {df_a[ID_COL].nunique()} patients")
 
-    card = load_gene_presence("CARD_resistance.csv", "CARD")
-    resfinder = load_gene_presence("ResFinder_resistance.csv", "ResFinder")
+    print("Loading Set B...")
+    df_b = load_all_patients(RAW_DIR_B, "B")
+    print(f"Set B: {len(df_b)} rows, {df_b[ID_COL].nunique()} patients")
 
-    features = card.join(resfinder, how="outer").fillna(0).astype(int)
-    features = features.reset_index()
+    df_combined = pd.concat([df_a, df_b], ignore_index=True)
+    print(f"Combined: {len(df_combined)} rows, {df_combined[ID_COL].nunique()} patients")
 
-    dataset = labels.merge(features, on="isolate", how="left")
-    gene_cols = [c for c in dataset.columns if c not in ("isolate", "Year", "label")]
-    dataset[gene_cols] = dataset[gene_cols].fillna(0).astype(int)
-
-    dataset.to_csv(PROCESSED / "features.csv", index=False)
-
-    edges = build_similarity_edges()
-    valid = set(dataset["isolate"])
-    edges = edges[edges["isolate_a"].isin(valid) & edges["isolate_b"].isin(valid)]
-    edges.to_csv(PROCESSED / "edges.csv", index=False)
-
-    n_nodes = len(dataset)
-    n_edges = len(edges)
-    avg_degree = 2 * n_edges / n_nodes
-    label_counts = dataset["label"].value_counts()
-
-    summary = (
-        f"Isolates: {n_nodes}\n"
-        f"Feature columns (gene presence/absence): {len(gene_cols)}\n"
-        f"Label distribution: resistant={label_counts.get(1, 0)}, susceptible={label_counts.get(0, 0)}\n"
-        f"Graph: {n_edges} edges (cutoff={GRAPH_CUTOFF}), avg degree={avg_degree:.1f}\n"
-    )
-    print(summary)
-    (PROCESSED / "dataset_summary.txt").write_text(summary)
+    out_path = os.path.join(PROC_DIR, "combined_raw.csv")
+    df_combined.to_csv(out_path, index=False)
+    print(f"Saved to {out_path}")
 
 
 if __name__ == "__main__":
